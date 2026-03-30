@@ -7,7 +7,7 @@ All tunable parameters and defaults live here.
 DEFAULT_SUBSET_SIZE = 31          # pixels, must be odd
 DEFAULT_GRID_STEP = 10            # pixels between grid points
 DEFAULT_SEARCH_MULTIPLIER = 2     # search window = subset_size * multiplier
-MIN_CORRELATION_THRESHOLD = 0.4   # below this, mark point as lost (NaN)
+MIN_CORRELATION_THRESHOLD = 0.85   # below this, mark point as lost (NaN)
 
 # --- Preprocessing ---
 CLAHE_CLIP_LIMIT = 2.0

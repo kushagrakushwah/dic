@@ -111,9 +111,27 @@ def compute_frame_strains(
         # Principal strains
         tensor = np.array([[exx[i], exy[i]], [exy[i], eyy[i]]])
         eigvals = np.linalg.eigvalsh(tensor)
+# ... (previous tensor math) ...
         E1[i] = eigvals[1]  # larger
         E2[i] = eigvals[0]  # smaller
         vm[i] = np.sqrt(E1[i]**2 - E1[i]*E2[i] + E2[i]**2)
+
+    # --- ADD THIS OUTLIER FILTER BEFORE RETURNING ---
+    # Reject physically impossible strains (e.g., > 100% or 1.0)
+    # This instantly kills runaway edge points so they don't spike the heatmap
+    max_reasonable_strain = 3.0 
+    
+    bad_points = (np.abs(exx) > max_reasonable_strain) | \
+                 (np.abs(eyy) > max_reasonable_strain) | \
+                 (np.abs(exy) > max_reasonable_strain)
+                 
+    exx[bad_points] = np.nan
+    eyy[bad_points] = np.nan
+    exy[bad_points] = np.nan
+    E1[bad_points] = np.nan
+    E2[bad_points] = np.nan
+    vm[bad_points] = np.nan
+    # ------------------------------------------------
 
     return dict(exx=exx, eyy=eyy, exy=exy, E1=E1, E2=E2, von_mises=vm)
 

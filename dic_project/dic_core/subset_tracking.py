@@ -53,19 +53,7 @@ def _track_single_point(
     corr_threshold: float,
 ) -> tuple:
     """
-    Track one point using NCC template matching.
-
-    Args:
-        ref_image       : reference (preprocessed, grayscale)
-        cur_image       : current frame (preprocessed, grayscale)
-        ref_pt          : reference position [x, y]
-        last_pt         : last known position [x, y] (initial guess)
-        half_subset     : half of the subset size
-        search_half     : half of the search window
-        corr_threshold  : minimum acceptable NCC score
-
-    Returns:
-        (new_x, new_y, score) where x/y are floats (NaN on failure).
+    Track one point using NCC template matching with Sub-pixel interpolation.
     """
     x0, y0 = int(round(ref_pt[0])), int(round(ref_pt[1]))
     template = _safe_extract_template(ref_image, x0, y0, half_subset)
@@ -86,7 +74,6 @@ def _track_single_point(
     if search_roi.shape[0] < template.shape[0] or search_roi.shape[1] < template.shape[1]:
         return np.nan, np.nan, 0.0
 
-    # cv2.TM_CCOEFF_NORMALIZED = 5 (integer fallback for older/headless OpenCV builds)
     _TM_CCOEFF_NORM = getattr(cv2, 'TM_CCOEFF_NORMALIZED', 5)
     result = cv2.matchTemplate(search_roi, template, _TM_CCOEFF_NORM)
     _, max_val, _, max_loc = cv2.minMaxLoc(result)
@@ -94,8 +81,30 @@ def _track_single_point(
     if max_val < corr_threshold:
         return np.nan, np.nan, float(max_val)
 
-    new_x = sx0 + max_loc[0] + half_subset
-    new_y = sy0 + max_loc[1] + half_subset
+    # --- SUB-PIXEL PARABOLIC FIT ---
+    mx, my = max_loc
+    dx, dy = 0.0, 0.0
+    
+    # Ensure we are not on the absolute edge of the result matrix
+    if 0 < mx < result.shape[1] - 1 and 0 < my < result.shape[0] - 1:
+        c = result[my, mx]
+        l = result[my, mx - 1]
+        r = result[my, mx + 1]
+        u = result[my - 1, mx]
+        d = result[my + 1, mx]
+        
+        # Parabolic peak approximation
+        denom_x = 2 * (l - 2 * c + r)
+        if denom_x != 0: 
+            dx = (l - r) / denom_x
+            
+        denom_y = 2 * (u - 2 * c + d)
+        if denom_y != 0: 
+            dy = (u - d) / denom_y
+
+    new_x = sx0 + mx + dx + half_subset
+    new_y = sy0 + my + dy + half_subset
+    
     return float(new_x), float(new_y), float(max_val)
 
 
@@ -125,7 +134,7 @@ class SubsetCorrelationWorker(QThread):
         output_folder: str,
         search_multiplier: float = DEFAULT_SEARCH_MULTIPLIER,
         corr_threshold: float = MIN_CORRELATION_THRESHOLD,
-        reinitialize_lost: bool = True,
+        reinitialize_lost: bool = False,
     ):
         super().__init__()
         self.images_gray = images_gray
@@ -146,66 +155,66 @@ class SubsetCorrelationWorker(QThread):
             self.error_occurred.emit(f"Subset tracking failed: {e}")
 
     def _run(self):
-        ref_image = self.images_gray[0]
-        half_subset = self.subset_size // 2
-        search_half = int(self.subset_size * self.search_multiplier)
-        n_points = len(self.initial_grid)
-        n_frames = len(self.images_gray)
+            half_subset = self.subset_size // 2
+            search_half = int(self.subset_size * self.search_multiplier)
+            n_points = len(self.initial_grid)
+            n_frames = len(self.images_gray)
 
-        all_frames_data = []
+            all_frames_data = []
 
-        # Frame 0 — initial positions
-        row0 = {'Image': self.image_names[0]}
-        for i, pt in enumerate(self.initial_grid):
-            row0[f'Point_{i+1}_X'] = pt[0]
-            row0[f'Point_{i+1}_Y'] = pt[1]
-        all_frames_data.append(row0)
+            # Frame 0 — initial positions
+            row0 = {'Image': self.image_names[0]}
+            for i, pt in enumerate(self.initial_grid):
+                row0[f'Point_{i+1}_X'] = pt[0]
+                row0[f'Point_{i+1}_Y'] = pt[1]
+            all_frames_data.append(row0)
 
-        previous_points = self.initial_grid.copy().astype(float)
+            previous_points = self.initial_grid.copy().astype(float)
 
-        for frame_idx in range(1, n_frames):
-            if self.isInterruptionRequested():
-                logger.info("Tracking interrupted by user.")
-                break
+            for frame_idx in range(1, n_frames):
+                if self.isInterruptionRequested():
+                    logger.info("Tracking interrupted by user.")
+                    break
 
-            cur_image = self.images_gray[frame_idx]
-            current_points = np.full_like(previous_points, np.nan)
-            row = {'Image': self.image_names[frame_idx]}
+                # --- INCREMENTAL TRACKING UPDATE ---
+                # Extract the template from the PREVIOUS frame instead of frame 0
+                prev_image = self.images_gray[frame_idx - 1]
+                cur_image = self.images_gray[frame_idx]
+                current_points = np.full_like(previous_points, np.nan)
+                row = {'Image': self.image_names[frame_idx]}
 
-            for i in range(n_points):
-                ref_pt = self.initial_grid[i]
-                last_pt = previous_points[i]
+                for i in range(n_points):
+                    ref_pt = self.initial_grid[i]
+                    last_pt = previous_points[i]
 
-                # If the previous position was lost, optionally reinitialize
-                if np.any(np.isnan(last_pt)):
-                    if self.reinitialize_lost:
-                        last_pt = ref_pt
-                    else:
-                        row[f'Point_{i+1}_X'] = np.nan
-                        row[f'Point_{i+1}_Y'] = np.nan
-                        continue
+                    if np.any(np.isnan(last_pt)):
+                        if self.reinitialize_lost:
+                            last_pt = ref_pt
+                        else:
+                            row[f'Point_{i+1}_X'] = np.nan
+                            row[f'Point_{i+1}_Y'] = np.nan
+                            continue
 
-                nx, ny, score = _track_single_point(
-                    ref_image, cur_image, ref_pt, last_pt,
-                    half_subset, search_half, self.corr_threshold
-                )
+                    # Pass last_pt twice so it extracts the template around the 
+                    # point's last known location from the previous frame
+                    nx, ny, score = _track_single_point(
+                        prev_image, cur_image, last_pt, last_pt,
+                        half_subset, search_half, self.corr_threshold
+                    )
 
-                current_points[i] = [nx, ny]
-                row[f'Point_{i+1}_X'] = nx
-                row[f'Point_{i+1}_Y'] = ny
+                    current_points[i] = [nx, ny]
+                    row[f'Point_{i+1}_X'] = nx
+                    row[f'Point_{i+1}_Y'] = ny
 
-                if np.isnan(nx):
-                    logger.debug(f"Frame {frame_idx}, point {i}: lost (score={score:.3f})")
+                all_frames_data.append(row)
+                previous_points = current_points.copy()
 
-            all_frames_data.append(row)
-            previous_points = current_points.copy()
+                progress = int(frame_idx / (n_frames - 1) * 100)
+                self.progress_updated.emit(progress)
 
-            progress = int(frame_idx / (n_frames - 1) * 100)
-            self.progress_updated.emit(progress)
-
-        df = pd.DataFrame(all_frames_data)
-        os.makedirs(self.output_folder, exist_ok=True)
-        csv_path = os.path.join(self.output_folder, "subset_tracked_points.csv")
-        df.to_csv(csv_path, index=False)
-        logger.info(f"Tracking complete. Saved to {csv_path}")
-        self.tracking_finished.emit(df)
+            df = pd.DataFrame(all_frames_data)
+            os.makedirs(self.output_folder, exist_ok=True)
+            csv_path = os.path.join(self.output_folder, "subset_tracked_points.csv")
+            df.to_csv(csv_path, index=False)
+            logger.info(f"Tracking complete. Saved to {csv_path}")
+            self.tracking_finished.emit(df)
